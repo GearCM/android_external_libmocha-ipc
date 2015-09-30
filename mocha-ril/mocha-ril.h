@@ -182,6 +182,7 @@ struct ril_state {
 	uint8_t rac_id;
 	uint16_t lac_id;
 	int gprs_last_failed_cid;
+	int last_call_fail_cause;
 	char proper_plmn[9];
 	char SPN[NET_MAX_SPN_LEN];
 	char name[NET_MAX_NAME_LEN];
@@ -248,6 +249,7 @@ struct ril_data {
 	struct ril_state state;
 	struct ril_tokens tokens;
 	ril_config config;
+	struct list_head *outgoing_sms;
 	struct list_head *gprs_connections;
 	struct list_head *net_select_list;
 	struct list_head *requests;
@@ -368,13 +370,13 @@ void ipc_sim_smsc_number(void* data);
 void ipc_sim_io_response(void* data);
 void ril_request_get_sim_status(RIL_Token t);
 void ril_state_update(ril_sim_state sim_state);
-void ril_request_enter_sim_pin(RIL_Token t, void *data, size_t datalen);
-void ril_request_enter_sim_puk(RIL_Token t, void *data, size_t datalen);
-void ril_request_query_facility_lock(RIL_Token t, void *data, size_t datalen);
-void ril_request_set_facility_lock(RIL_Token t, void *data, size_t datalen);
-void ril_request_change_sim_pin(RIL_Token t, void *data, size_t datalen);
+void ril_request_enter_sim_pin(RIL_Token t, void *data, size_t size);
+void ril_request_enter_sim_puk(RIL_Token t, void *data, size_t size);
+void ril_request_query_facility_lock(RIL_Token t, void *data, size_t size);
+void ril_request_set_facility_lock(RIL_Token t, void *data, size_t size);
+void ril_request_change_sim_pin(RIL_Token t, void *data, size_t size);
 int ril_request_sim_io_register(RIL_Token t, int command, int fileid,
-	int p1, int p2, int p3, char *data, int length,
+	int p1, int p2, int p3, void *data, size_t size,
 	struct ril_request_sim_io_info **sim_io_p);
 void ril_request_sim_io_unregister(struct ril_request_sim_io_info *sim_io);
 struct ril_request_sim_io_info *ril_request_sim_io_info_find(void);
@@ -382,13 +384,25 @@ struct ril_request_sim_io_info *ril_request_sim_io_info_find_token(RIL_Token t);
 void ril_request_sim_io_info_clear(struct ril_request_sim_io_info *sim_io);
 void ril_request_sim_io_next(void);
 void ril_request_sim_io_complete(RIL_Token t, int command, int fileid,
-	int p1, int p2, int p3, char *data, int length);
-void ril_request_sim_io(RIL_Token t, void *data, int length);
+	int p1, int p2, int p3, void *data, size_t size);
+void ril_request_sim_io(RIL_Token t, void *data, size_t size);
 
 /* SMS */
+struct ril_request_send_sms_info {
+	unsigned char *pdu;
+	size_t pdu_size;
+	unsigned char *smsc;
+	size_t smsc_size;
+	RIL_Token token;
+};
 void ipc_sms_send_status(void* data);
-void ipc_incoming_sms(void* data);
+int ril_request_send_sms_register(unsigned char *pdu, size_t pdu_size, unsigned char *smsc, size_t smsc_size, RIL_Token t);
+void ril_request_send_sms_unregister(struct ril_request_send_sms_info *send_sms);
+struct ril_request_send_sms_info *ril_request_send_sms_info_find(void);
+void ril_request_send_sms_next(void);
+void ril_request_send_sms_complete(RIL_Token t, unsigned char *pdu, size_t pdu_size, unsigned char *smsc, size_t smsc_size);
 void ril_request_send_sms(RIL_Token t, void *data, size_t length);
+void ipc_incoming_sms(void* data);
 void ril_request_send_sms_expect_more(RIL_Token t, void *data, size_t length);
 void nettext_cb_setup(void);
 

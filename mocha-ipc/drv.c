@@ -40,11 +40,6 @@
 #define LOG_TAG "RIL-Mocha-IPC_DRV"
 #include <utils/Log.h>
 
-/*
- * TODO: Implement handling of all the IpcDrv packets
- *
- */
-
 #ifdef DEVICE_JET
 #include <device/jet/sound_data.h>
 char *nvm_file_path = "/efs/bml4";
@@ -57,13 +52,70 @@ char *power_dev_path = "/sys/devices/platform/i2c-gpio.6/i2c-6/6-0066/max8998-ch
 char *fake_apps_version = "S8530JPKA1";
 #endif
 
-/*
- * TODO: Read sound config data from file
- */
 int battery_state = BATTERY_CHARGING_DISABLED;
 int usb_cable_state = CABLE_REMOVED;
 int ac_cable_state = CABLE_REMOVED;
 int fd_cap, fd_temp, fd_volt;
+
+void ipc_parse_drv(struct ipc_client* client, struct modem_io *ipc_frame)
+{
+	int32_t retval;
+	struct drvPacketHeader *rx_header;
+
+	rx_header = (struct drvPacketHeader *)(ipc_frame->data);
+
+    switch (rx_header->drvPacketType) {
+	case READ_NV_BACKUP:
+		DEBUG_I("ReadNvBackup IpcDrv packet received");
+		handleReadNvRequest((struct drvNvPacket *)(ipc_frame->data));
+		break;
+#if defined (DEVICE_JET)
+	case PMIC_PACKET:
+		DEBUG_I("PMIC IpcDrv packet received");
+		handleJetPmicRequest(ipc_frame);
+		break;
+#endif
+	case SYSTEM_INFO_REQ:
+		DEBUG_I("SYSTEM_INFO_REQ IpcDrv packet received");
+		handleSystemInfoRequest();
+		break;
+	case TA_INFO_REQ:
+		DEBUG_I("TA_INFO requested");
+		send_ta_info();
+		break;
+	case BATT_GAUGE_STATUS_CHANGE_IND:
+		DEBUG_I("BATT_GAUGE_STATUS_CHANGE_IND IpcDrv packet received");
+		handleFuelGaugeStatus(*((uint8_t*)ipc_frame->data + 1));
+		break;
+	case BATT_GAUGE_STATUS_RESP:
+		DEBUG_I("BATT_GAUGE_STATUS_RESP IpcDrv packet received");
+		handleFuelGaugeStatus(*((uint8_t*)ipc_frame->data + 1));
+		break;
+	case BATT_GAUGE_LEVEL_CHANGE_IND:
+	case TA_CHANGE_CP:
+	case DRV_STAT:
+		//unused packets
+		break;
+	default:
+		DEBUG_I("IpcDrv Packet type 0x%X is not yet handled", rx_header->drvPacketType);
+		DEBUG_I("Frame type = 0x%x\n Frame length = 0x%x", ipc_frame->cmd, ipc_frame->datasize);
+		ipc_hex_dump(client, ipc_frame->data, ipc_frame->datasize);
+		break;
+    }
+}
+
+void drv_send_packet(uint8_t type, uint8_t *data, int32_t data_size)
+{
+	struct modem_io request;
+	request.data = malloc(data_size + sizeof(struct drvPacketHeader));
+	request.data[0] = type;
+	memcpy(request.data + 1, data, data_size);
+	request.magic = 0xCAFECAFE;
+	request.cmd = FIFO_PKT_DRV;
+	request.datasize = data_size + 1;
+	ipc_send(&request);
+	free(request.data);
+}
 
 int32_t get_nvm_data(void *data, uint32_t size)
 {
@@ -137,13 +189,12 @@ void handleJetPmicRequest(struct modem_io *ipc_frame)
 }
 #endif
 
-void handleSystemInfoRequest()
+void handleSystemInfoRequest(void)
 {
     uint8_t payload[0x14];
 	struct drvRequest tx_packet;
 	struct modem_io request;
 	
-	/* TODO: for WAVE add USB TA info sending if there's USB connected (it shouldn't be sent if USB is disconnected) */
 	tm_send_packet(0x0,0x0D, (uint8_t*)RCV_MSM_Data, sizeof(RCV_MSM_Data));
 	tm_send_packet(0x0,0x12, (uint8_t*)SPK_MSM_Data, sizeof(SPK_MSM_Data));
 	tm_send_packet(0x0,0x10, (uint8_t*)EAR_MSM_Data, sizeof(EAR_MSM_Data));
@@ -163,7 +214,7 @@ void *battery_thread(void *data)
 {
 	struct timeval select_timeout;
 	char buf[200];
-	int32_t fd_usb, fd_ac, status;
+	int32_t fd_usb, fd_ac, fd_full, status, len;
 
 	ipc_batt_thread *batt_thread = (ipc_batt_thread *)data;
 
@@ -175,21 +226,26 @@ void *battery_thread(void *data)
 	sprintf(buf, "%s%s", power_dev_path, "ac/online");
 	fd_ac = open(buf, O_RDONLY);
 	if (fd_ac < 0)
-		DEBUG_E("Couldn't open %s", buf);
+		DEBUG_E("Couldn't open %s, %s", buf, strerror(errno));
 
-	sprintf(buf, "%s%s", power_dev_path, "battery/temp");
+	sprintf(buf, "%s%s", power_dev_path, "battery/batt_temp_adc");
 	fd_temp = open(buf, O_RDWR);
 	if (fd_temp < 0)
 		DEBUG_E("Couldn't open %s, %s", buf, strerror(errno));
 
-	sprintf(buf, "%s%s", power_dev_path, "battery/voltage_now");
+	sprintf(buf, "%s%s", power_dev_path, "battery/batt_volt");
 	fd_volt = open(buf, O_RDWR);
 	if (fd_volt < 0)
 		DEBUG_E("Couldn't open %s, %s", buf, strerror(errno));
 
-	sprintf(buf, "%s%s", power_dev_path, "battery/capacity");
+	sprintf(buf, "%s%s", power_dev_path, "battery/batt_soc");
 	fd_cap = open(buf, O_RDWR);
 	if (fd_cap < 0)
+		DEBUG_E("Couldn't open %s, %s", buf, strerror(errno));
+
+	sprintf(buf, "%s%s", power_dev_path, "battery/batt_full_interrupt");
+	fd_full = open(buf, O_RDWR);
+	if (fd_full < 0)
 		DEBUG_E("Couldn't open %s, %s", buf, strerror(errno));
 
 	ALOGD("%s: Battery thread initialized", __func__);
@@ -234,12 +290,26 @@ void *battery_thread(void *data)
 				status = 2; //remove
 			}
 		}
+		if (status == 0)
+		{
+			pread(fd_full, buf, 1, 0);
+			if (buf[0] == '1')
+			{
+				DEBUG_I("%s: battery full interrupt registered", __func__);
+				status = 0xB;
+				sprintf(buf, "%d", 0);
+				len = strlen(buf);
+				if(write(fd_full, buf, strlen(buf)) != len)
+					DEBUG_E("%s: Failed to write batt_full_interrupt, error: %s", __func__, strerror(errno));
+			}
+		}
 		if (status != 0)
 		{
 			drv_send_packet(TA_CHANGE_AP, (uint8_t*)&status, 4);
 			status = 0;
 		}
 		tm_send_packet(0x1,0xA, 0, 0);
+
 	}
 }
 
@@ -262,7 +332,7 @@ void battery_thread_start(void)
 		DEBUG_E("%s: Battery thread initialization failed", __func__);
 }
 
-void send_ta_info()
+void send_ta_info(void)
 {
 	char buf[200];
 	struct drvRequest tx_packet;
@@ -302,7 +372,6 @@ void handleFuelGaugeStatus(uint8_t percentage)
 {
 	char buf[10];
 	int32_t fd, len;
-	int32_t status = 0xB;
 
 	DEBUG_I("%s: Percentage: %d%%", __func__, percentage);
 
@@ -310,69 +379,4 @@ void handleFuelGaugeStatus(uint8_t percentage)
 	len = strlen(buf);
 	if(write(fd_cap, buf, strlen(buf)) != len)
 		DEBUG_E("%s: Failed to write battery capacity, error: %s", __func__, strerror(errno));
-
-	if (percentage == 100 && battery_state == BATTERY_CHARGING)
-	{
-		battery_state = BATTERY_FULL;
-		drv_send_packet(TA_CHANGE_AP, (uint8_t*)&status, 4);
-	}
-}
-
-void ipc_parse_drv(struct ipc_client* client, struct modem_io *ipc_frame)
-{
-	int32_t retval;
-	struct drvPacketHeader *rx_header;
-
-	rx_header = (struct drvPacketHeader *)(ipc_frame->data);
-	
-    switch (rx_header->drvPacketType) {
-	case READ_NV_BACKUP:
-		DEBUG_I("ReadNvBackup IpcDrv packet received");
-		handleReadNvRequest((struct drvNvPacket *)(ipc_frame->data));
-		break;
-#if defined (DEVICE_JET)
-	case PMIC_PACKET:
-		DEBUG_I("PMIC IpcDrv packet received");
-		handleJetPmicRequest(ipc_frame);
-		break;
-#endif
-	case SYSTEM_INFO_REQ:
-		DEBUG_I("SYSTEM_INFO_REQ IpcDrv packet received");
-		handleSystemInfoRequest();
-		break;
-	case TA_INFO_REQ:
-		DEBUG_I("TA_INFO requested");
-		send_ta_info();
-		break;
-	case BATT_GAUGE_STATUS_CHANGE_IND:	
-		DEBUG_I("BATT_GAUGE_STATUS_CHANGE_IND IpcDrv packet received");
-		handleFuelGaugeStatus(*((uint8_t*)ipc_frame->data + 1));
-		break;
-	case BATT_GAUGE_STATUS_RESP:	
-		DEBUG_I("BATT_GAUGE_STATUS_RESP IpcDrv packet received");
-		handleFuelGaugeStatus(*((uint8_t*)ipc_frame->data + 1));
-		break;
-	default:
-		DEBUG_I("IpcDrv Packet type 0x%X is not yet handled", rx_header->drvPacketType);
-		DEBUG_I("Frame type = 0x%x\n Frame length = 0x%x", ipc_frame->cmd, ipc_frame->datasize);
-
-		ipc_hex_dump(client, ipc_frame->data, ipc_frame->datasize);
-
-		break;
-    }
-
-    DEBUG_I("DRV exit");
-}
-
-void drv_send_packet(uint8_t type, uint8_t *data, int32_t data_size)
-{
-	struct modem_io request;
-	request.data = malloc(data_size + sizeof(struct drvPacketHeader));
-	request.data[0] = type;
-	memcpy(request.data + 1, data, data_size);
-	request.magic = 0xCAFECAFE;
-	request.cmd = FIFO_PKT_DRV;
-	request.datasize = data_size + 1;
-	ipc_send(&request);
-	free(request.data);
 }
